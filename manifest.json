@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "id": "bastos.mtg-search",
+  "name": "MTG Card Search",
+  "version": "0.1.0",
+  "author": "bastos",
+  "license": "MIT",
+  "description": "Search Magic: The Gathering cards from the bar, with card images, prices, and a link to the full card page on Scryfall.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "MTG Card Search",
+    "description": "Search Magic: The Gathering cards with the Scryfall API. Requests go to api.scryfall.com only while the panel is open, at most one a second, and results are cached for a day.",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "maxResults": 40,
+      "order": "name",
+      "showPrices": true
+    },
+    "schema": [
+      {
+        "key": "maxResults",
+        "type": "integer",
+        "label": "Results shown",
+        "min": 10,
+        "max": 175,
+        "step": 5,
+        "defaultValue": 40,
+        "description": "How many matching cards the panel lists. Scryfall returns at most 175 per request."
+      },
+      {
+        "key": "order",
+        "type": "enum",
+        "label": "Sort by",
+        "options": [
+          "name",
+          "released",
+          "edhrec",
+          "usd",
+          "cmc",
+          "rarity"
+        ],
+        "defaultValue": "name",
+        "description": "Order Scryfall sorts matching cards in."
+      },
+      {
+        "key": "showPrices",
+        "type": "boolean",
+        "label": "Show prices",
+        "defaultValue": true,
+        "description": "Show Scryfall's USD and EUR market prices under the card image."
+      }
+    ]
+  }
+}

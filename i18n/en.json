@@ -1,0 +1,28 @@
+{
+  "panel.placeholder": "Search cards, e.g. lightning bolt or t:dragon c:r",
+  "panel.hint": "Type a card name or any Scryfall query.",
+  "panel.searching": "Searching…",
+  "panel.noResults": "No cards match that search.",
+  "panel.error.network": "Couldn't reach Scryfall.",
+  "panel.error.too-large": "Scryfall's response was too large.",
+  "panel.error.invalid": "Scryfall sent a response this plugin couldn't read.",
+  "panel.error.api": "Scryfall: %1",
+  "panel.results": {
+    "one": "%1 card",
+    "other": "%1 cards"
+  },
+  "panel.resultsShown": "%1 of %2",
+  "panel.noImage": "No image",
+  "panel.face": "Face %1 of %2",
+  "panel.copied": "Copied %1",
+  "panel.footer": "↑↓ select · ←→ flip · Enter open · Ctrl+C copy name · Esc close",
+  "rarity.common": "Common",
+  "rarity.uncommon": "Uncommon",
+  "rarity.rare": "Rare",
+  "rarity.mythic": "Mythic",
+  "rarity.special": "Special",
+  "rarity.bonus": "Bonus",
+  "panel.typeMore": "Keep typing, or press Enter to search.",
+  "panel.waiting": "Waiting %1 s",
+  "panel.error.rate-limited": "Scryfall asked for fewer searches, so searching is paused. It resumes on its own."
+}
