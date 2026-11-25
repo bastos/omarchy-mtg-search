@@ -32,7 +32,7 @@
         "max": 175,
         "step": 5,
         "defaultValue": 40,
-        "description": "How many matching cards the panel lists. Scryfall returns at most 175 per request."
+        "description": "How many matching cards the panel lists at first, and adds each time you ask for more. Scryfall returns at most 175 per request."
       },
       {
         "key": "order",

@@ -40,6 +40,11 @@ Any [Scryfall search](https://scryfall.com/docs/syntax) works: sets, rarities,
 rules text, card types and more. Double-faced cards show "Face 1 of 2" and
 flip with ← / →.
 
+The list starts with the first `maxResults` cards. Moving past the last one
+lists that many more, and asks Scryfall for its next page of 175 only once
+every card already loaded is listed. A search keeps up to 1,750 cards; the
+count beside the search line shows how many matched in all.
+
 <p>
   <img src="screenshots/alpha-rares.png" width="49%" alt="Searching e:lea r:rare lists Limited Edition Alpha rares, with Ancestral Recall selected">
   <img src="screenshots/transforming-planeswalkers.png" width="49%" alt="Searching t:planeswalker is:transform lists transforming planeswalkers, with the front face of Ajani, Nacatl Pariah selected">
@@ -49,6 +54,7 @@ flip with ← / →.
 |-----|--------|
 | ↑ / ↓, Ctrl+J / Ctrl+K, Ctrl+N / Ctrl+P | Move through results |
 | Page Up / Page Down | Move five results |
+| ↓ on the last card (or click the row under it) | List more cards |
 | ← / → (or click the image) | Flip a double-faced card |
 | Enter (or double-click) | Open the card on scryfall.com |
 | Ctrl+C | Copy the card name |
@@ -70,7 +76,7 @@ picks up changes on save.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `maxResults` | `40` | Cards listed, 10 to 175 |
+| `maxResults` | `40` | Cards listed at first, and added each time you ask for more, 10 to 175 |
 | `order` | `"name"` | Sort order: `name`, `released`, `edhrec`, `usd`, `cmc` or `rarity` |
 | `showPrices` | `true` | Show Scryfall's USD and EUR prices |
 
@@ -94,9 +100,15 @@ the shell loads once and shares across every monitor's bar.
 - One request is in flight at a time. Queries typed meanwhile collapse into
   the newest one.
 - Searches start at least one second apart, half of Scryfall's limit.
-- Successful results are cached in memory for 24 hours, up to 20 queries.
+- Successful results are cached in memory for 24 hours, up to 20 queries or
+  3,500 cards.
   Backspacing, reopening, re-sorting to something already seen, or changing
   `maxResults` sends nothing.
+- Later pages are fetched only when you ask for more cards than are loaded,
+  never ahead of time. Each is one request through the same queue and
+  one-second spacing as a search, and joins its search in the cache, at most
+  ten pages a search. The page URL is built by the plugin; the `next_page`
+  link in Scryfall's response is not followed.
 - An HTTP 429 pauses all searching for 35 seconds, doubling on each repeat
   within ten minutes, up to ten minutes. The panel shows a countdown, then
   retries the latest query once.
@@ -126,8 +138,8 @@ node --test tests/
 omarchy plugin validate .
 ```
 
-The tests cover parsing and validation of Scryfall's responses, the rate
-limiter, the cache and the search state machine, and check that every QML
+The tests cover parsing and validation of Scryfall's responses, paging, the
+rate limiter, the cache and the search state machine, and check that every QML
 text is plain text and every translation key exists.
 
 Saving a file reloads the plugin, but the shell can keep the previous

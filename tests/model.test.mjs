@@ -41,9 +41,14 @@ function card(overrides) {
   }, overrides)
 }
 
-function list(data, total) {
-  return JSON.stringify({ object: "list", total_cards: total ?? data.length, has_more: false, data })
+function list(data, total, hasMore = false) {
+  return JSON.stringify({ object: "list", total_cards: total ?? data.length, has_more: hasMore, data })
 }
+
+// A card id that differs per `n`, and `count` distinct cards starting there.
+const idFor = (n) => "00000000-0000-4000-8000-" + String(n).padStart(12, "0")
+const cardsFrom = (start, count) => Array.from({ length: count }, (_, i) => card({ id: idFor(start + i) }))
+const page = (start, count, total, hasMore) => Model.parseSearchResponse(list(cardsFrom(start, count), total, hasMore), 0, 200)
 
 // ---------------------------------------------------------------- parsing
 
@@ -325,6 +330,130 @@ test("nextStep: a rate-limited search waits out the cooldown, then goes once", (
   assert.equal(held.action, "wait")
   assert.equal(held.ms, cooldown - 1000)
   assert.equal(Model.nextStep(state, cooldown).action, "start")
+})
+
+// ---------------------------------------------------------------- pages
+
+test("a response says whether Scryfall has another page", () => {
+  assert.equal(page(0, 3, 3, false).hasMore, false)
+  const first = page(0, 3, 500, true)
+  assert.equal(first.hasMore, true)
+  assert.equal(first.pages, 1)
+  // Only a literal true counts, and never on a page with no usable cards.
+  assert.equal(Model.parseSearchResponse(JSON.stringify({ object: "list", has_more: "yes", data: [card()] }), 0, 200).hasMore, false)
+  assert.equal(Model.parseSearchResponse(list([], 500, true), 0, 200).hasMore, false)
+  assert.equal(Model.parseSearchResponse("", 6, 0).hasMore, false)
+})
+
+test("the next page's URL is our own search URL, never Scryfall's next_page", () => {
+  const url = Model.buildSearchUrl("t:goblin", "name")
+  const body = JSON.parse(list(cardsFrom(0, 2), 500, true))
+  body.next_page = "https://evil.example/cards/search?page=2"
+  const first = Model.parseSearchResponse(JSON.stringify(body), 0, 200)
+  const next = Model.nextPageUrl(url, first)
+  assert.equal(next, url + "&page=2")
+  assert.equal(Model.searchCommand(next).at(-1), next)
+  assert.equal(Model.nextPageUrl(url, Model.appendPage(first, page(2, 2, 500, true))), url + "&page=3")
+  assert.equal(Model.nextPageUrl(url, page(0, 2, 2, false)), "")
+  assert.equal(Model.nextPageUrl(url, Model.parseSearchResponse("", 6, 0)), "")
+  assert.equal(Model.nextPageUrl("", first), "")
+})
+
+test("appendPage joins a page on, skipping cards already listed", () => {
+  const first = page(0, 3, 10, true)
+  const joined = Model.appendPage(first, page(2, 3, 11, true)) // card 2 repeats
+  assert.equal(joined.cards.map((c) => c.id).join(), [0, 1, 2, 3, 4].map(idFor).join())
+  assert.equal(joined.total, 11)
+  assert.equal(joined.pages, 2)
+  assert.equal(joined.hasMore, true)
+  // The search it was joined onto is untouched.
+  assert.equal(first.cards.length, 3)
+  assert.equal(first.pages, 1)
+  // The last page ends it; so does a page that adds nothing.
+  assert.equal(Model.appendPage(joined, page(5, 1, 11, false)).hasMore, false)
+  assert.equal(Model.appendPage(joined, page(0, 3, 11, true)).hasMore, false)
+})
+
+test("a search stops growing at MAX_LOADED_CARDS", () => {
+  let search = page(0, Model.MAX_API_RESULTS, 99999, true)
+  for (let n = 1; search.hasMore; n++) {
+    assert.ok(n < 50, "paging never ends")
+    search = Model.appendPage(search, page(n * Model.MAX_API_RESULTS, Model.MAX_API_RESULTS, 99999, true))
+  }
+  assert.equal(search.cards.length, Model.MAX_LOADED_CARDS)
+  assert.equal(search.total, 99999)
+  assert.equal(Model.nextPageUrl("u", search), "")
+})
+
+test("a later page joins its search's cache entry, once", () => {
+  const url = Model.buildSearchUrl("t:goblin", "name")
+  const first = page(0, 3, 9, true)
+  const second = page(3, 3, 9, true)
+  const secondUrl = Model.nextPageUrl(url, first)
+  // Nothing cached for the search: nothing to join.
+  assert.equal(Model.cacheAppend(url, secondUrl, second, 0), null)
+
+  Model.cachePut(url, first, 0)
+  // Failures and pages the entry is not waiting for are refused.
+  assert.equal(Model.cacheAppend(url, secondUrl, Model.parseSearchResponse("", 6, 0), 1), null)
+  assert.equal(Model.cacheAppend(url, url + "&page=3", second, 1), null)
+
+  const joined = Model.cacheAppend(url, secondUrl, second, 1)
+  assert.equal(joined.cards.length, 6)
+  assert.equal(Model.cacheGet(url, 2), joined)
+  // The same page again is not what the entry waits for now.
+  assert.equal(Model.cacheAppend(url, secondUrl, second, 3), null)
+  assert.equal(Model.cacheGet(url, 4).cards.length, 6)
+
+  // The search still expires 24 hours after its first page.
+  assert.equal(Model.cacheAppend(url, Model.nextPageUrl(url, joined), page(6, 3, 9, false), Model.CACHE_TTL_MS), null)
+  assert.equal(Model.cacheGet(url, Model.CACHE_TTL_MS), null)
+})
+
+test("nextStep: a wanted page goes through the same slot and limiter as a search", () => {
+  const A = Model.buildSearchUrl("goblin guide", "name")
+  const B = Model.buildSearchUrl("goblin king", "name")
+  const more = A + "&page=2"
+  const state = (o) => Object.assign({ pendingUrl: A, shownUrl: A, failedUrl: "", inflightUrl: "", moreUrl: more }, o)
+
+  // Shown and no page asked for: nothing to do.
+  assert.equal(Model.nextStep(state({ moreUrl: "" }), 0).action, "idle")
+  const start = Model.nextStep(state(), 0)
+  assert.equal(start.action, "start")
+  assert.equal(start.url, more)
+  assert.equal(Model.nextStep(state({ inflightUrl: more }), 0).action, "busy")
+
+  Model.noteRequestStarted(0)
+  assert.equal(Model.nextStep(state(), 300).action, "wait")
+  const cooldown = Model.noteRateLimited(400)
+  assert.equal(Model.nextStep(state(), 400 + cooldown - 1).action, "wait")
+  assert.equal(Model.nextStep(state(), 400 + cooldown).action, "start")
+
+  // A new search comes before the old search's page.
+  assert.equal(Model.nextStep(state({ pendingUrl: B }), 400 + cooldown).url, B)
+})
+
+test("the cache holds a budget of cards, so deeply paged searches push out older ones", () => {
+  const full = () => page(0, Model.MAX_API_RESULTS, 99999, true)
+  const pages = Model.CACHE_MAX_CARDS / Model.MAX_API_RESULTS
+  for (let i = 0; i < pages; i++) Model.cachePut("u" + i, full(), i)
+  assert.equal(Model.cache.size, pages)
+
+  // Paging the oldest search makes it the newest, and the next oldest goes.
+  const second = page(Model.MAX_API_RESULTS, Model.MAX_API_RESULTS, 99999, true)
+  assert.equal(Model.cacheAppend("u0", "u0&page=2", second, pages).cards.length, 2 * Model.MAX_API_RESULTS)
+  assert.equal(Model.cache.has("u1"), false)
+  assert.equal(Model.cacheGet("u0", pages + 1).pages, 2)
+
+  // A search paged to its limit fits, with room left for others.
+  let big = full()
+  while (big.hasMore) big = Model.appendPage(big, page(big.cards.length, Model.MAX_API_RESULTS, 99999, true))
+  Model.cachePut("big", big, pages + 2)
+  assert.equal(Model.cacheGet("big", pages + 3), big)
+  let held = 0
+  Model.cache.forEach((entry) => { held += entry.result.cards.length })
+  assert.equal(held, Model.CACHE_MAX_CARDS)
+  assert.ok(Model.cache.size > 1)
 })
 
 // ---------------------------------------------------------------- QML
