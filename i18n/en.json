@@ -12,6 +12,9 @@
     "other": "%1 cards"
   },
   "panel.resultsShown": "%1 of %2",
+  "panel.more": "↓ or click for more cards",
+  "panel.loadingMore": "Loading more cards…",
+  "panel.moreFailed": "Couldn't load more cards. Press ↓ or click to try again.",
   "panel.noImage": "No image",
   "panel.face": "Face %1 of %2",
   "panel.copied": "Copied %1",

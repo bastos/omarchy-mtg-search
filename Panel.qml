@@ -34,14 +34,27 @@ Panel {
   readonly property bool showPrices: setting("showPrices", true) !== false
 
   property string query: ""
-  // Every card from the last successful search (Scryfall's page of up to
-  // 175). maxResults only decides how many are listed, so changing it never
-  // fetches again.
-  property var allCards: []
-  readonly property var cards: allCards.slice(0, maxResults)
-  property int total: 0
-  property string errorKind: ""
-  property string errorDetails: ""
+  // The result on screen: the last search's outcome, with each later page
+  // the user asked for joined on. Everything below reads from it.
+  property var shown: Model.EMPTY
+  // Every card loaded: Scryfall's first page of up to 175, plus later pages.
+  readonly property var allCards: shown.cards
+  readonly property int total: shown.total
+  readonly property string errorKind: shown.error
+  readonly property string errorDetails: shown.details
+  // The next page's URL, "" when Scryfall has no more.
+  readonly property string nextUrl: Model.nextPageUrl(shownUrl, shown)
+  // maxResults is how many cards are listed at first and how many each
+  // "more" adds, so changing it never fetches; a request goes out only once
+  // every loaded card is listed.
+  property int extraShown: 0
+  readonly property int shownLimit: maxResults + extraShown
+  readonly property var cards: allCards.slice(0, shownLimit)
+  readonly property bool hasMore: cards.length < allCards.length || nextUrl !== ""
+  // The user asked for the next page and it has not arrived yet.
+  property bool wantMore: false
+  // The last page asked for failed; asking again retries it.
+  property bool moreFailed: false
   property int selectedIndex: 0
   property int faceIndex: 0
   property string notice: ""
@@ -72,14 +85,23 @@ Panel {
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
+  readonly property string waitingLabel:
+    strings.t("panel.waiting").arg(Commons.I18n.formatNumber(Math.ceil(cooldownLeft / 1000)))
+
   readonly property string countLabel: {
-    if (cooldownLeft > 0 && errorKind === "rate-limited")
-      return strings.t("panel.waiting").arg(Commons.I18n.formatNumber(Math.ceil(cooldownLeft / 1000)))
+    if (cooldownLeft > 0 && errorKind === "rate-limited") return waitingLabel
     if (searching) return strings.t("panel.searching")
     if (cards.length === 0) return ""
     var all = strings.tn("panel.results", total).arg(Commons.I18n.formatNumber(total))
     if (total <= cards.length) return all
     return strings.t("panel.resultsShown").arg(Commons.I18n.formatNumber(cards.length)).arg(all)
+  }
+
+  // The row under the last card, shown while there is more to list.
+  readonly property string moreLabel: {
+    if (wantMore) return cooldownLeft > 0 ? waitingLabel : strings.t("panel.loadingMore")
+    if (moreFailed) return strings.t("panel.moreFailed")
+    return strings.t("panel.more")
   }
 
   readonly property string statusMessage: {
@@ -126,6 +148,7 @@ Panel {
   function close() {
     searchDebounce.stop()
     requestTimer.stop()
+    wantMore = false
     root.controller.hide()
   }
 
@@ -156,16 +179,6 @@ Panel {
     searchDebounce.restart()
   }
 
-  function clearResults() {
-    allCards = []
-    total = 0
-    errorKind = ""
-    errorDetails = ""
-    selectedIndex = 0
-    shownUrl = ""
-    failedUrl = ""
-  }
-
   // The user asked for a search (typed, Enter, reopened, re-sorted).
   function runSearch(force) {
     searchDebounce.stop()
@@ -173,7 +186,7 @@ Panel {
     // Typing never sends a short query; it only keeps what is already shown.
     if (!force && url !== shownUrl && !Model.isLiveQuery(query)) url = ""
     pendingUrl = url
-    if (url === "") clearResults()
+    if (url === "") showResult("", Model.EMPTY)
     // Searching again is how a failed search is retried.
     else failedUrl = ""
     step()
@@ -187,7 +200,8 @@ Panel {
       pendingUrl: pendingUrl,
       shownUrl: shownUrl,
       failedUrl: failedUrl,
-      inflightUrl: searchProc.url
+      inflightUrl: searchProc.url,
+      moreUrl: wantMore ? nextUrl : ""
     }, Date.now())
     if (next.action === "show") {
       showResult(pendingUrl, next.result)
@@ -195,10 +209,11 @@ Panel {
       requestTimer.interval = Math.ceil(next.ms)
       requestTimer.restart()
     } else if (next.action === "start") {
-      searchProc.url = pendingUrl
+      searchProc.url = next.url
+      searchProc.searchUrl = pendingUrl
       runExitCode = -1
       Model.noteRequestStarted(Date.now())
-      searchProc.command = Model.searchCommand(pendingUrl)
+      searchProc.command = Model.searchCommand(next.url)
       searchProc.running = true
     }
   }
@@ -206,21 +221,61 @@ Panel {
   // One curl run has ended, successfully or not.
   function settle(output, exitCode) {
     var ranUrl = searchProc.url
+    var searchUrl = searchProc.searchUrl // the search this request was for
     searchProc.url = ""
+    var now = Date.now()
     var response = Model.splitStatus(output)
     var result = Model.parseSearchResponse(response.body, exitCode, response.status)
-    if (result.error === "rate-limited") Model.noteRateLimited(Date.now())
-    // Cached even if the query moved on: going back to it is then free.
-    else Model.cachePut(ranUrl, result, Date.now())
-    if (ranUrl === pendingUrl) showResult(ranUrl, result)
+    if (result.error === "rate-limited") Model.noteRateLimited(now)
+    // Either way the cache keeps it even if the query moved on: going back
+    // to that search is then free.
+    if (ranUrl === searchUrl) {
+      Model.cachePut(ranUrl, result, now)
+      if (ranUrl === pendingUrl) showResult(ranUrl, result)
+    } else {
+      Model.cacheAppend(searchUrl, ranUrl, result, now)
+      if (searchUrl === shownUrl && ranUrl === nextUrl) showPage(result)
+    }
+    step()
+  }
+
+  // A later page of the search on screen arrived or failed. The selection
+  // and the scroll position stay put.
+  function showPage(page) {
+    moreFailed = !page.ok
+    // A rate-limited page stays wanted, so step() sends it once the cooldown
+    // ends; any other failure waits for the user to ask again.
+    if (page.error !== "rate-limited") wantMore = false
+    if (page.ok) keepingScroll(function() { shown = Model.appendPage(shown, page) })
+  }
+
+  // `cards` is a new array whenever more are listed, and a ListView handed a
+  // new model goes back to the top; put it back where it was.
+  function keepingScroll(change) {
+    var list = panel.loadedContent ? panel.loadedContent.resultsList : null
+    var y = list ? list.contentY : 0
+    change()
+    if (list) Qt.callLater(function() { list.contentY = y })
+  }
+
+  // List the next maxResults cards. Loaded cards are listed at once; Scryfall
+  // is asked for its next page only when every loaded card is already listed.
+  function showMore() {
+    var listedAll = cards.length === allCards.length
+    // Make room even when the cards are still to be fetched, so the page is
+    // listed as it lands.
+    if (shownLimit <= allCards.length) keepingScroll(function() { extraShown += maxResults })
+    if (!listedAll || nextUrl === "" || wantMore) return
+    wantMore = true
+    moreFailed = false
     step()
   }
 
   function showResult(url, result) {
-    errorKind = result.error
-    errorDetails = result.details
-    allCards = result.cards
-    total = result.total
+    extraShown = 0
+    wantMore = false
+    moreFailed = false
+    shown = result
     shownUrl = result.ok ? url : ""
     // A rate-limited search stays wanted, so step() sends it once the
     // cooldown ends; any other failure waits for the user.
@@ -254,6 +309,7 @@ Panel {
   Process {
     id: searchProc
     property string url: ""
+    property string searchUrl: ""
     stdout: StdioCollector { id: searchOutput; waitForEnd: true }
     onExited: function(exitCode) { root.runExitCode = exitCode }
     // Fires after exited, and is the only signal from a curl that failed to
@@ -268,6 +324,8 @@ Panel {
 
   function move(delta) {
     if (cards.length === 0) return
+    // Moving past the last card asks for more.
+    if (delta > 0 && selectedIndex + delta > cards.length - 1) showMore()
     selectedIndex = Util.clamp(selectedIndex + delta, 0, cards.length - 1)
   }
 
@@ -436,7 +494,30 @@ Panel {
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             currentIndex: root.selectedIndex
-            onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
+            onCurrentIndexChanged: keepSelectionVisible()
+
+            // On the last card, show the "more" row under it too. Deferred, so
+            // it runs after keepingScroll has put the list back.
+            function keepSelectionVisible() {
+              Qt.callLater(function() {
+                var at = root.selectedIndex
+                if (at >= count) return
+                if (at === count - 1 && root.hasMore) positionViewAtEnd()
+                else positionViewAtIndex(at, ListView.Contain)
+              })
+            }
+
+            footer: Button {
+              width: ListView.view ? ListView.view.width : 0
+              height: root.hasMore ? Style.space(32) : 0
+              visible: root.hasMore
+              text: root.moreLabel
+              foreground: root.moreFailed && !root.wantMore ? root.urgent : root.dim
+              accent: root.accent
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              onClicked: root.showMore()
+            }
 
             delegate: Item {
               id: row

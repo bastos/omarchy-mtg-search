@@ -20,6 +20,10 @@ var MIN_LIVE_QUERY_CHARS = 3
 var MAX_QUERY_CHARS = 500
 var MAX_RESPONSE_BYTES = 8000000
 var MAX_API_RESULTS = 175
+// Scryfall pages a search 175 cards at a time. A search keeps at most ten
+// pages, so one broad query cannot grow without bound in memory; past that,
+// the card count still says how many matched.
+var MAX_LOADED_CARDS = 1750
 var ORDERS = ["name", "released", "edhrec", "usd", "cmc", "rarity"]
 var RARITIES = ["common", "uncommon", "rare", "mythic", "special", "bonus"]
 var ERROR_KINDS = ["network", "too-large", "invalid", "api", "rate-limited"]
@@ -51,9 +55,12 @@ var RATE_LIMIT_COOLDOWN_MS = 35000
 var RATE_LIMIT_MAX_COOLDOWN_MS = 600000
 var STRIKE_WINDOW_MS = 600000
 var CACHE_TTL_MS = 24 * 60 * 60 * 1000
-// Each entry holds up to 175 cards; twenty recent queries is plenty to make
-// backspacing and re-sorting free without holding megabytes for days.
+// Each entry holds one search: its first page of up to 175 cards, plus any
+// later pages the user asked for. Twenty recent queries is plenty to make
+// backspacing and re-sorting free; the card budget (twenty first pages)
+// keeps a few deeply paged searches from holding megabytes for days.
 var CACHE_MAX_ENTRIES = 20
+var CACHE_MAX_CARDS = 3500
 
 function freshLimiter() {
   return { lastStart: -Infinity, cooldownUntil: 0, strikes: 0, lastStrike: -Infinity }
@@ -104,35 +111,69 @@ function cachePut(url, result, now) {
   if (!url || !result || !result.ok) return
   cache.delete(url)
   cache.set(url, { at: now, result: result })
-  // Expired entries go too, not only the oldest beyond the cap.
+  cacheTrim(now)
+}
+
+// Drops expired entries, then the least recently used ones beyond the entry
+// cap or the card budget.
+function cacheTrim(now) {
+  var cards = 0
   cache.forEach(function(entry, key) {
     if (now - entry.at >= CACHE_TTL_MS) cache.delete(key)
+    else cards += entry.result.cards.length
   })
-  while (cache.size > CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value)
+  while (cache.size > CACHE_MAX_ENTRIES || cards > CACHE_MAX_CARDS) {
+    var oldest = cache.keys().next().value
+    cards -= cache.get(oldest).result.cards.length
+    cache.delete(oldest)
+  }
 }
 
 function cacheClear() {
   cache.clear()
 }
 
+// Adds a later page to its search's cache entry and returns the search with
+// the page joined on, or null when the entry is gone or is not waiting for
+// exactly this page (so a page can never be added twice). The entry keeps its
+// original time: the whole search expires 24 hours after its first page.
+function cacheAppend(baseUrl, pageUrl, page, now) {
+  if (!page.ok) return null
+  var base = cacheGet(baseUrl, now)
+  if (!base || nextPageUrl(baseUrl, base) !== pageUrl) return null
+  var joined = appendPage(base, page)
+  cache.get(baseUrl).result = joined
+  cacheTrim(now)
+  return joined
+}
+
 // What the panel does next for the search it wants:
-//   { action: "idle" }            nothing to do (none wanted, shown, or failed)
+//   { action: "idle" }            nothing to do (none wanted, failed, or shown
+//                                 with no further page asked for)
 //   { action: "show", result }    answered from the cache, no request
 //   { action: "busy" }            a request is in flight; its end steps again
 //   { action: "wait", ms }        the limiter holds the request this long
-//   { action: "start" }           send it now
-// `state` is { pendingUrl, shownUrl, failedUrl, inflightUrl }. A failed URL
-// is not retried until the user searches again; a rate-limited one is not
-// marked failed, so it waits out the cooldown and then goes once.
+//   { action: "start", url }      send `url` now, for the search pendingUrl
+// `state` is { pendingUrl, shownUrl, failedUrl, inflightUrl, moreUrl }. A
+// failed URL is not retried until the user searches again; a rate-limited one
+// is not marked failed, so it waits out the cooldown and then goes once.
+// `moreUrl` is the next page of the search on screen, set only while the user
+// has asked for it. A new search always comes first, and a page goes through
+// the same single request slot and the same limiter as a search.
 function nextStep(state, now) {
   var url = state.pendingUrl
-  if (url === "" || url === state.shownUrl || url === state.failedUrl) return { action: "idle" }
-  var cached = cacheGet(url, now)
-  if (cached) return { action: "show", result: cached }
+  if (url === "" || url === state.failedUrl) return { action: "idle" }
+  if (url === state.shownUrl) {
+    url = state.moreUrl || ""
+    if (url === "") return { action: "idle" }
+  } else {
+    var cached = cacheGet(url, now)
+    if (cached) return { action: "show", result: cached }
+  }
   if (state.inflightUrl !== "") return { action: "busy" }
   var wait = requestDelay(now)
   if (wait > 0) return { action: "wait", ms: wait }
-  return { action: "start" }
+  return { action: "start", url: url }
 }
 
 // curl appends the HTTP status as a final line (-w), so the status survives
@@ -208,6 +249,15 @@ function buildSearchUrl(query, order) {
     + "?q=" + encodeURIComponent(q)
     + "&order=" + normalizeOrder(order)
     + "&unique=cards"
+}
+
+// The URL of the page after the ones `result` holds, or "" when the search
+// has no more (or has reached MAX_LOADED_CARDS). Built here from our own
+// search URL: Scryfall's `next_page` link is never followed, only its
+// `has_more` flag is read.
+function nextPageUrl(baseUrl, result) {
+  if (!baseUrl || !result.hasMore) return ""
+  return baseUrl + "&page=" + (result.pages + 1)
 }
 
 // The curl argv for a search URL. Passed as an argument array, never through
@@ -301,38 +351,40 @@ function normalizeCard(raw) {
 }
 
 // Turns a response body, curl's exit code and the HTTP status into
-// { ok, cards, total, error, details }, with error one of ERROR_KINDS or "".
+// { ok, cards, total, hasMore, pages, error, details }, with error one of
+// ERROR_KINDS or "". `pages` counts the Scryfall pages in `cards` (one, until
+// appendPage joins more on) and `hasMore` says another page exists.
 // Without curl's -f, Scryfall's HTTP errors arrive as JSON with exit code 0,
 // so a non-zero exit always means curl itself failed (DNS, TLS, timeout,
 // size cap, or -1: it never started). A query that matches nothing is an
 // empty success.
 function parseSearchResponse(text, exitCode, httpStatus) {
   // Checked first: a 429 must slow us down whatever else went wrong.
-  if (httpStatus === 429) return failure("rate-limited", "")
+  if (httpStatus === 429) return failure("rate-limited")
   var code = exitCode || 0
-  if (code === CURL_FILESIZE_EXCEEDED) return failure("too-large", "")
-  if (code !== 0) return failure("network", "")
+  if (code === CURL_FILESIZE_EXCEEDED) return failure("too-large")
+  if (code !== 0) return failure("network")
 
   var raw = text == null ? "" : String(text)
-  if (raw.trim() === "") return failure("network", "")
+  if (raw.trim() === "") return failure("network")
   // curl already caps the body in bytes; this guards the parse regardless.
-  if (raw.length > MAX_RESPONSE_BYTES) return failure("too-large", "")
+  if (raw.length > MAX_RESPONSE_BYTES) return failure("too-large")
 
   var parsed
   try {
     parsed = JSON.parse(raw)
   } catch (e) {
-    return failure("invalid", "")
+    return failure("invalid")
   }
-  if (!parsed || typeof parsed !== "object") return failure("invalid", "")
+  if (!parsed || typeof parsed !== "object") return failure("invalid")
 
   if (parsed.object === "error") {
-    if (parsed.status === 429 || parsed.code === "rate_limited") return failure("rate-limited", "")
-    if (parsed.code === "not_found") return { ok: true, cards: [], total: 0, error: "", details: "" }
+    if (parsed.status === 429 || parsed.code === "rate_limited") return failure("rate-limited")
+    if (parsed.code === "not_found") return success([], 0, false, 1)
     return failure("api", cleanString(parsed.details, LIMITS.details))
   }
 
-  if (parsed.object !== "list" || !Array.isArray(parsed.data)) return failure("invalid", "")
+  if (parsed.object !== "list" || !Array.isArray(parsed.data)) return failure("invalid")
 
   var cards = []
   for (var i = 0; i < parsed.data.length && cards.length < MAX_API_RESULTS; i++) {
@@ -344,9 +396,35 @@ function parseSearchResponse(text, exitCode, httpStatus) {
   if (isNaN(total) || total < cards.length) total = cards.length
   total = Math.min(total, 1000000)
 
-  return { ok: true, cards: cards, total: total, error: "", details: "" }
+  return success(cards, total, parsed.has_more === true && cards.length > 0, 1)
+}
+
+// A search with one more page joined on. Neither argument is changed. Cards
+// already listed are skipped, in case Scryfall's data shifted between the
+// two requests. A page that adds nothing ends the search, whatever it claims.
+function appendPage(base, page) {
+  var seen = {}
+  var cards = base.cards.slice()
+  for (var i = 0; i < cards.length; i++) seen[cards[i].id] = true
+  for (var j = 0; j < page.cards.length && cards.length < MAX_LOADED_CARDS; j++) {
+    var card = page.cards[j]
+    if (seen[card.id]) continue
+    seen[card.id] = true
+    cards.push(card)
+  }
+  var grew = cards.length > base.cards.length
+  var hasMore = page.hasMore && grew && cards.length < MAX_LOADED_CARDS
+  // The newest page's count is the freshest, but never below what is held.
+  return success(cards, Math.max(page.total, cards.length), hasMore, base.pages + 1)
+}
+
+// What the panel shows before any search.
+var EMPTY = success([], 0, false, 1)
+
+function success(cards, total, hasMore, pages) {
+  return { ok: true, cards: cards, total: total, hasMore: hasMore, pages: pages, error: "", details: "" }
 }
 
 function failure(error, details) {
-  return { ok: false, cards: [], total: 0, error: error, details: details || "" }
+  return { ok: false, cards: [], total: 0, hasMore: false, pages: 0, error: error, details: details || "" }
 }
