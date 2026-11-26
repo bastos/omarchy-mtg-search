@@ -414,10 +414,10 @@ test("nextStep: a wanted page goes through the same slot and limiter as a search
   const A = Model.buildSearchUrl("goblin guide", "name")
   const B = Model.buildSearchUrl("goblin king", "name")
   const more = A + "&page=2"
-  const state = (o) => Object.assign({ pendingUrl: A, shownUrl: A, failedUrl: "", inflightUrl: "", moreUrl: more }, o)
+  const state = (o) => Object.assign({ pendingUrl: A, shownUrl: A, failedUrl: "", inflightUrl: "", followUrl: more }, o)
 
   // Shown and no page asked for: nothing to do.
-  assert.equal(Model.nextStep(state({ moreUrl: "" }), 0).action, "idle")
+  assert.equal(Model.nextStep(state({ followUrl: "" }), 0).action, "idle")
   const start = Model.nextStep(state(), 0)
   assert.equal(start.action, "start")
   assert.equal(start.url, more)
@@ -431,6 +431,34 @@ test("nextStep: a wanted page goes through the same slot and limiter as a search
 
   // A new search comes before the old search's page.
   assert.equal(Model.nextStep(state({ pendingUrl: B }), 400 + cooldown).url, B)
+})
+
+test("a card keeps its oracle id, from the faces when the top level has none", () => {
+  const OID = "4457ed35-7c10-48c8-9776-456485fdf070"
+  assert.equal(Model.normalizeCard(card({ oracle_id: OID })).oracleId, OID)
+  assert.equal(Model.normalizeCard(card({ card_faces: [{ oracle_id: OID }, { oracle_id: ID }] })).oracleId, OID)
+  assert.equal(Model.normalizeCard(card({ oracle_id: null, card_faces: [{ oracle_id: OID }] })).oracleId, OID)
+  assert.equal(Model.normalizeCard(card({ oracle_id: "not-an-id" })).oracleId, "")
+  assert.equal(Model.normalizeCard(card()).oracleId, "")
+})
+
+test("a card's printings are our own search on its oracle id, newest first", () => {
+  const OID = "4457ed35-7c10-48c8-9776-456485fdf070"
+  const url = Model.printingsUrl(OID)
+  assert.equal(url, Model.API_SEARCH + "?q=oracleid%3A" + OID + "&order=released&unique=prints")
+  assert.equal(Model.searchCommand(url).at(-1), url)
+  // Never the same search as a typed query, which lists unique cards.
+  assert.notEqual(url, Model.buildSearchUrl("oracleid:" + OID, "released"))
+  assert.equal(Model.printingsUrl(""), "")
+  assert.equal(Model.printingsUrl("x&unique=art"), "")
+  // Printings page like any search.
+  assert.equal(Model.nextPageUrl(url, page(0, 175, 400, true)), url + "&page=2")
+})
+
+test("indexOfCard finds a printing by id", () => {
+  const cards = page(0, 3).cards
+  assert.equal(Model.indexOfCard(cards, idFor(2)), 2)
+  assert.equal(Model.indexOfCard(cards, ID), -1)
 })
 
 test("the cache holds a budget of cards, so deeply paged searches push out older ones", () => {

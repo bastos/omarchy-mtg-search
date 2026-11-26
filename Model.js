@@ -55,10 +55,11 @@ var RATE_LIMIT_COOLDOWN_MS = 35000
 var RATE_LIMIT_MAX_COOLDOWN_MS = 600000
 var STRIKE_WINDOW_MS = 600000
 var CACHE_TTL_MS = 24 * 60 * 60 * 1000
-// Each entry holds one search: its first page of up to 175 cards, plus any
-// later pages the user asked for. Twenty recent queries is plenty to make
-// backspacing and re-sorting free; the card budget (twenty first pages)
-// keeps a few deeply paged searches from holding megabytes for days.
+// Each entry holds one search (a query, or one card's printings): its first
+// page of up to 175 cards, plus any later pages the user asked for. Twenty
+// recent searches is plenty to make backspacing and re-sorting free; the
+// card budget (twenty first pages) keeps a few deeply paged searches from
+// holding megabytes for days.
 var CACHE_MAX_ENTRIES = 20
 var CACHE_MAX_CARDS = 3500
 
@@ -153,18 +154,19 @@ function cacheAppend(baseUrl, pageUrl, page, now) {
 //   { action: "show", result }    answered from the cache, no request
 //   { action: "busy" }            a request is in flight; its end steps again
 //   { action: "wait", ms }        the limiter holds the request this long
-//   { action: "start", url }      send `url` now, for the search pendingUrl
-// `state` is { pendingUrl, shownUrl, failedUrl, inflightUrl, moreUrl }. A
+//   { action: "start", url }      send `url` now
+// `state` is { pendingUrl, shownUrl, failedUrl, inflightUrl, followUrl }. A
 // failed URL is not retried until the user searches again; a rate-limited one
 // is not marked failed, so it waits out the cooldown and then goes once.
-// `moreUrl` is the next page of the search on screen, set only while the user
-// has asked for it. A new search always comes first, and a page goes through
+// `followUrl` is a further request for what is on screen (the next page of
+// results, or the selected card's printings), set only while the user has
+// asked for it. A new search always comes first, and a follow-up goes through
 // the same single request slot and the same limiter as a search.
 function nextStep(state, now) {
   var url = state.pendingUrl
   if (url === "" || url === state.failedUrl) return { action: "idle" }
   if (url === state.shownUrl) {
-    url = state.moreUrl || ""
+    url = state.followUrl || ""
     if (url === "") return { action: "idle" }
   } else {
     var cached = cacheGet(url, now)
@@ -251,6 +253,23 @@ function buildSearchUrl(query, order) {
     + "&unique=cards"
 }
 
+// The search for every printing of a card, newest first, as Scryfall's own
+// prints_search_uri asks for it. Built here from the card's validated oracle
+// id rather than by following that link. "" without an oracle id.
+function printingsUrl(oracleId) {
+  if (typeof oracleId !== "string" || !CARD_ID_RE.test(oracleId)) return ""
+  return API_SEARCH
+    + "?q=" + encodeURIComponent("oracleid:" + oracleId)
+    + "&order=released"
+    + "&unique=prints"
+}
+
+// Where `id` sits in `cards`, or -1.
+function indexOfCard(cards, id) {
+  for (var i = 0; i < cards.length; i++) if (cards[i].id === id) return i
+  return -1
+}
+
 // The URL of the page after the ones `result` holds, or "" when the search
 // has no more (or has reached MAX_LOADED_CARDS). Built here from our own
 // search URL: Scryfall's `next_page` link is never followed, only its
@@ -331,12 +350,19 @@ function normalizeCard(raw) {
     manaCost = cleanString(costs.join(" // "), LIMITS.manaCost)
   }
 
+  // Shared by every printing of the card. Reversible cards keep it on their
+  // faces only.
+  var oracleId = raw.oracle_id
+  if (typeof oracleId !== "string" && faces.length > 0 && faces[0]) oracleId = faces[0].oracle_id
+  if (typeof oracleId !== "string" || !CARD_ID_RE.test(oracleId)) oracleId = ""
+
   var setCode = typeof raw.set === "string" && SET_CODE_RE.test(raw.set) ? raw.set.toUpperCase() : ""
   var rarity = RARITIES.indexOf(raw.rarity) >= 0 ? raw.rarity : ""
   var prices = raw.prices && typeof raw.prices === "object" ? raw.prices : {}
 
   return {
     id: raw.id,
+    oracleId: oracleId,
     name: name,
     manaCost: manaCost,
     typeLine: cleanString(raw.type_line, LIMITS.typeLine),

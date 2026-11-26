@@ -37,8 +37,10 @@ Typing searches once you stop for a moment, from three characters. Press
 Enter to search a shorter query right away.
 
 Any [Scryfall search](https://scryfall.com/docs/syntax) works: sets, rarities,
-rules text, card types and more. Double-faced cards show "Face 1 of 2" and
-flip with ← / →.
+rules text, card types and more. ← / → step through the selected card's
+printings, newest first, with each one's set, prices and image; Enter then
+opens that printing. Double-faced cards show "Face 1 of 2" and flip with
+Ctrl+F or a click on the image.
 
 The list starts with the first `maxResults` cards. Moving past the last one
 lists that many more, and asks Scryfall for its next page of 175 only once
@@ -55,8 +57,9 @@ count beside the search line shows how many matched in all.
 | ↑ / ↓, Ctrl+J / Ctrl+K, Ctrl+N / Ctrl+P | Move through results |
 | Page Up / Page Down | Move five results |
 | ↓ on the last card (or click the row under it) | List more cards |
-| ← / → (or click the image) | Flip a double-faced card |
-| Enter (or double-click) | Open the card on scryfall.com |
+| ← / → | Newer / older printing of the card |
+| Ctrl+F (or click the image) | Flip a double-faced card |
+| Enter (or double-click) | Open the card (or the printing shown) on scryfall.com |
 | Ctrl+C | Copy the card name |
 | Ctrl+U / Ctrl+Backspace | Clear the search / delete a word |
 | Tab / Shift+Tab | Switch to the neighbouring bar panel |
@@ -109,6 +112,12 @@ the shell loads once and shares across every monitor's bar.
   one-second spacing as a search, and joins its search in the cache, at most
   ten pages a search. The page URL is built by the plugin; the `next_page`
   link in Scryfall's response is not followed.
+- A card's printings are fetched the first time you press ← or → on it, as
+  one search through the same queue, and cached like any other. Cards with
+  more than 175 printings (basic lands, mostly) page the same way as you
+  keep pressing →. If the printing your search found is not on the first
+  page, that one press pages on until it is, so ← and → step from it. The search is built from the card's oracle id; the
+  `prints_search_uri` link in the response is not followed.
 - An HTTP 429 pauses all searching for 35 seconds, doubling on each repeat
   within ten minutes, up to ten minutes. The panel shows a countdown, then
   retries the latest query once.

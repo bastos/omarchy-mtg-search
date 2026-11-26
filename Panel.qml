@@ -57,6 +57,21 @@ Panel {
   property bool moreFailed: false
   property int selectedIndex: 0
   property int faceIndex: 0
+
+  // The selected card's printings, fetched the first time ← or → is pressed
+  // on it, and paged like results as → reaches the last one loaded. Moving
+  // to another card drops them (they stay cached).
+  property string printsUrl: ""   // the printings search for the selected card
+  property var prints: null       // its loaded printings, or null
+  property int printIndex: -1     // the one shown; -1 shows the card as found
+  property bool wantPrints: false // asked for printings that have not arrived
+  property bool printsFailed: false
+  property int printsDelta: 0     // the ← or → to apply once they arrive
+  readonly property string printsNextUrl: prints ? Model.nextPageUrl(printsUrl, prints) : ""
+  // Scryfall's count while more can be loaded; once none can (all of them,
+  // or the 1,750 cap), the count loaded, so the last one reads "N of N".
+  readonly property int printsTotal: !prints ? 0 : printsNextUrl !== "" ? prints.total : prints.cards.length
+  readonly property string printsWantedUrl: !wantPrints ? "" : prints ? printsNextUrl : printsUrl
   property string notice: ""
   property int cooldownLeft: 0
 
@@ -67,8 +82,13 @@ Panel {
   readonly property bool searching: pendingUrl !== "" && pendingUrl !== shownUrl && pendingUrl !== failedUrl
 
   readonly property var selectedCard: selectedIndex >= 0 && selectedIndex < cards.length ? cards[selectedIndex] : null
-  readonly property int faceCount: selectedCard ? selectedCard.images.length : 0
-  readonly property string selectedImage: faceCount > 0 ? selectedCard.images[Math.min(faceIndex, faceCount - 1)] : ""
+  readonly property string selectedId: selectedCard ? selectedCard.id : ""
+  // The printing in the preview: the selected card, or one of its printings.
+  readonly property var previewCard: prints && printIndex >= 0 && printIndex < prints.cards.length
+    ? prints.cards[printIndex] : selectedCard
+  readonly property string previewId: previewCard ? previewCard.id : ""
+  readonly property int faceCount: previewCard ? previewCard.images.length : 0
+  readonly property string selectedImage: faceCount > 0 ? previewCard.images[Math.min(faceIndex, faceCount - 1)] : ""
   // Follows selectedImage once it settles, so holding an arrow key loads only
   // the card it stops on rather than every card it passes.
   property string previewImage: ""
@@ -104,6 +124,18 @@ Panel {
     return strings.t("panel.more")
   }
 
+  // Under the card image: which printing and which face are shown.
+  readonly property string printLabel: {
+    var parts = []
+    if (wantPrints) parts.push(cooldownLeft > 0 ? waitingLabel : strings.t("panel.loadingPrints"))
+    else if (printsFailed) parts.push(strings.t("panel.printsFailed"))
+    else if (prints && printIndex >= 0)
+      parts.push(strings.t("panel.printing").arg(Commons.I18n.formatNumber(printIndex + 1)).arg(Commons.I18n.formatNumber(printsTotal)))
+    if (faceCount > 1)
+      parts.push(strings.t("panel.face").arg(Commons.I18n.formatNumber(faceIndex + 1)).arg(Commons.I18n.formatNumber(faceCount)))
+    return parts.join("  ·  ")
+  }
+
   readonly property string statusMessage: {
     if (cards.length > 0) return ""
     // While a 429 cooldown runs the search is still wanted, so this comes
@@ -118,7 +150,17 @@ Panel {
   }
 
   onCardsChanged: if (selectedIndex >= cards.length) selectedIndex = Math.max(0, cards.length - 1)
-  onSelectedIndexChanged: faceIndex = 0
+  // Keyed on ids, not indexes: listing more cards keeps the card, and with
+  // it the printing on screen; so does a new search whose first card is the
+  // one already selected.
+  onSelectedIdChanged: {
+    printsUrl = ""
+    prints = null
+    printIndex = -1
+    wantPrints = false
+    printsFailed = false
+  }
+  onPreviewIdChanged: faceIndex = 0
   // Re-sort only while the panel is up; a closed panel catches up when it
   // opens, since open() runs the search for the current order.
   onOrderChanged: if (opened) runSearch(false)
@@ -149,6 +191,7 @@ Panel {
     searchDebounce.stop()
     requestTimer.stop()
     wantMore = false
+    wantPrints = false
     root.controller.hide()
   }
 
@@ -201,7 +244,7 @@ Panel {
       shownUrl: shownUrl,
       failedUrl: failedUrl,
       inflightUrl: searchProc.url,
-      moreUrl: wantMore ? nextUrl : ""
+      followUrl: (wantMore && nextUrl) || printsWantedUrl
     }, Date.now())
     if (next.action === "show") {
       showResult(pendingUrl, next.result)
@@ -210,7 +253,9 @@ Panel {
       requestTimer.restart()
     } else if (next.action === "start") {
       searchProc.url = next.url
-      searchProc.searchUrl = pendingUrl
+      // The search this request is a page of: the card's printings, or the
+      // results (a new search, or their next page).
+      searchProc.searchUrl = next.url === printsWantedUrl ? printsUrl : pendingUrl
       runExitCode = -1
       Model.noteRequestStarted(Date.now())
       searchProc.command = Model.searchCommand(next.url)
@@ -232,9 +277,11 @@ Panel {
     if (ranUrl === searchUrl) {
       Model.cachePut(ranUrl, result, now)
       if (ranUrl === pendingUrl) showResult(ranUrl, result)
+      else if (ranUrl === printsUrl && !prints) showPrints(result, false)
     } else {
       Model.cacheAppend(searchUrl, ranUrl, result, now)
       if (searchUrl === shownUrl && ranUrl === nextUrl) showPage(result)
+      else if (searchUrl === printsUrl && ranUrl === printsNextUrl) showPrints(result, true)
     }
     step()
   }
@@ -269,6 +316,56 @@ Panel {
     wantMore = true
     moreFailed = false
     step()
+  }
+
+  // ← / →: the selected card's newer or older printing. The first press on a
+  // card asks Scryfall for its printings (or takes them from the cache);
+  // → past the last one loaded asks for the next page.
+  function browsePrints(delta) {
+    var card = selectedCard
+    if (!card) return
+    var url = Model.printingsUrl(card.oracleId)
+    if (url === "") return
+    if (url !== printsUrl) {
+      printsUrl = url
+      prints = Model.cacheGet(url, Date.now())
+    }
+    // Start from the printing the search found. Until it is among those
+    // loaded, page on toward it (newest first, so it is further on); if it is
+    // not there at all, start from the newest.
+    if (prints && printIndex < 0) printIndex = Model.indexOfCard(prints.cards, selectedId)
+    if (!prints || (printIndex < 0 && printsNextUrl !== "")) return askPrints(delta)
+    if (prints.cards.length === 0) return
+    var target = printIndex + delta
+    if (target >= prints.cards.length) {
+      if (printsNextUrl !== "") askPrints(delta)
+      return
+    }
+    printIndex = Util.clamp(target, 0, prints.cards.length - 1)
+    // Moving within the loaded ones answers an earlier failed page.
+    printsFailed = false
+  }
+
+  function askPrints(delta) {
+    if (wantPrints) return
+    printsDelta = delta
+    wantPrints = true
+    printsFailed = false
+    step()
+  }
+
+  // The selected card's printings, or a later page of them, arrived or
+  // failed. The key that asked for them then takes effect.
+  function showPrints(result, isPage) {
+    printsFailed = !result.ok
+    // A rate-limited request stays wanted, so step() sends it once the
+    // cooldown ends; any other failure waits for the next ← or →.
+    if (result.error !== "rate-limited") wantPrints = false
+    if (!result.ok) return
+    prints = isPage ? Model.appendPage(prints, result) : result
+    // A closed panel takes the printings but sends nothing more: the key
+    // that asked for them takes effect only while it is open.
+    if (root.opened) browsePrints(printsDelta)
   }
 
   function showResult(url, result) {
@@ -335,7 +432,7 @@ Panel {
   }
 
   function openSelected() {
-    var card = selectedCard
+    var card = previewCard
     if (!card || !Model.isCardPageUrl(card.pageUrl)) return
     // Close first: the panel holds keyboard focus, and the browser should
     // take it.
@@ -344,7 +441,7 @@ Panel {
   }
 
   function copySelected() {
-    var card = selectedCard
+    var card = previewCard
     if (!card) return
     Quickshell.execDetached(["wl-copy", "--", card.name])
     notice = strings.t("panel.copied").arg(card.name)
@@ -397,9 +494,9 @@ Panel {
           } else if (event.key === Qt.Key_PageUp) {
             root.move(-5)
           } else if (key === Qt.Key_Right) {
-            root.flip(1)
+            root.browsePrints(1)
           } else if (key === Qt.Key_Left) {
-            root.flip(-1)
+            root.browsePrints(-1)
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             // With nothing to open, Enter searches now: below the typing
             // threshold, or without waiting for the keystroke debounce.
@@ -407,6 +504,8 @@ Panel {
             else root.runSearch(true)
           } else if (ctrlOnly && event.key === Qt.Key_C) {
             root.copySelected()
+          } else if (ctrlOnly && event.key === Qt.Key_F) {
+            root.flip(1)
           } else if (Util.editsFilter(event, searchInput.text)) {
             searchInput.text = Util.editedFilter(event, searchInput.text)
           } else {
@@ -690,9 +789,9 @@ Panel {
 
             PlainText {
               width: parent.width
-              visible: root.faceCount > 1
-              text: strings.t("panel.face").arg(Commons.I18n.formatNumber(root.faceIndex + 1)).arg(Commons.I18n.formatNumber(root.faceCount))
-              color: root.dim
+              visible: text !== ""
+              text: root.printLabel
+              color: root.printsFailed && !root.wantPrints ? root.urgent : root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               horizontalAlignment: Text.AlignHCenter
@@ -700,9 +799,9 @@ Panel {
 
             PlainText {
               width: parent.width
-              visible: root.selectedCard !== null
+              visible: root.previewCard !== null
               text: {
-                var card = root.selectedCard
+                var card = root.previewCard
                 if (!card) return ""
                 var parts = []
                 if (card.setName !== "") parts.push(card.setName)
@@ -720,7 +819,7 @@ Panel {
               width: parent.width
               visible: root.showPrices && text !== ""
               text: {
-                var card = root.selectedCard
+                var card = root.previewCard
                 if (!card) return ""
                 var parts = []
                 if (card.usd !== "") parts.push("$" + Commons.I18n.formatNumber(Number(card.usd), 2))

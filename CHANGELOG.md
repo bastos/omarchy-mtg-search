@@ -6,6 +6,10 @@
   last card, or clicking the row under it, lists more. Scryfall's next page
   is fetched only when the loaded cards run out, under the same rate limits
   as a search, up to 1,750 cards a search.
+- ← / → now step through the selected card's printings, newest first, with
+  each one's set, prices and image. They are fetched on the first press and
+  paged as you go. Double-faced cards flip with Ctrl+F (or a click on the
+  image) instead.
 - `maxResults` is now how many cards are listed at first and added each time.
 
 ## 0.1.0

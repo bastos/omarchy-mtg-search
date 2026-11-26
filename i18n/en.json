@@ -18,7 +18,7 @@
   "panel.noImage": "No image",
   "panel.face": "Face %1 of %2",
   "panel.copied": "Copied %1",
-  "panel.footer": "↑↓ select · ←→ flip · Enter open · Ctrl+C copy name · Esc close",
+  "panel.footer": "↑↓ select · ←→ printings · Ctrl+F flip · Enter open · Ctrl+C copy · Esc close",
   "rarity.common": "Common",
   "rarity.uncommon": "Uncommon",
   "rarity.rare": "Rare",
@@ -27,5 +27,8 @@
   "rarity.bonus": "Bonus",
   "panel.typeMore": "Keep typing, or press Enter to search.",
   "panel.waiting": "Waiting %1 s",
-  "panel.error.rate-limited": "Scryfall asked for fewer searches, so searching is paused. It resumes on its own."
+  "panel.error.rate-limited": "Scryfall asked for fewer searches, so searching is paused. It resumes on its own.",
+  "panel.printing": "Printing %1 of %2",
+  "panel.loadingPrints": "Loading printings…",
+  "panel.printsFailed": "Couldn't load printings"
 }
